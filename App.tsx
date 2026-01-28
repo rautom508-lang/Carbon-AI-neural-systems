@@ -61,42 +61,48 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    let isMounted = true;
+
     const initialize = async () => {
-      // Safety timeout: If DB doesn't respond in 4s, force unlock to Gateway
+      // Safety timeout: If DB doesn't respond in 3s, force unlock to Gateway
       const timeout = setTimeout(() => {
-        if (isLoading) {
-          console.warn("Neural sync timeout. Forcing gateway access.");
+        if (isMounted) {
           setIsLoading(false);
         }
-      }, 4000);
+      }, 3000);
 
       try {
         const user = await databaseService.getSession();
-        if (user) {
+        if (user && isMounted) {
           setCurrentUser(user);
           setCurrentView('DASHBOARD');
-          await fetchHistory(user.id);
+          // Fetch history in background
+          fetchHistory(user.id);
         }
       } catch (err) {
         console.error("Initialization error:", err);
       } finally {
-        clearTimeout(timeout);
-        setIsLoading(false);
+        if (isMounted) {
+          clearTimeout(timeout);
+          setIsLoading(false);
+        }
       }
     };
 
     initialize();
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const timer = setInterval(() => {
+      if (isMounted) setCurrentTime(new Date());
+    }, 1000);
 
     const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session) {
+      if (event === 'SIGNED_IN' && session && isMounted) {
         const user = await databaseService.getSession();
         if (user) {
           setCurrentUser(user);
           setCurrentView('DASHBOARD');
-          await fetchHistory(user.id);
+          fetchHistory(user.id);
         }
-      } else if (event === 'SIGNED_OUT') {
+      } else if (event === 'SIGNED_OUT' && isMounted) {
         setCurrentUser(null);
         setCurrentView('LOCKED');
         setHistory([]);
@@ -104,78 +110,47 @@ const App: React.FC = () => {
     });
 
     return () => {
+      isMounted = false;
       clearInterval(timer);
       authListener.subscription.unsubscribe();
     };
   }, []);
 
-  useEffect(() => {
-    if (!currentUser) return;
-
-    const channel = supabase
-      .channel('emissions_sync')
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'emissions',
-        filter: `user_id=eq.${currentUser.id}`
-      }, () => {
-        fetchHistory(currentUser.id);
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [currentUser?.id]);
+  // Handlers for authentication and navigation
+  const handleAuthSuccess = (user: UserRecord) => {
+    setCurrentUser(user);
+    setCurrentView('DASHBOARD');
+    fetchHistory(user.id);
+  };
 
   const handleLogout = async () => {
     await databaseService.logout();
     setCurrentUser(null);
     setCurrentView('LOCKED');
-    setIsSidebarOpen(false);
+    setHistory([]);
   };
 
-  const handleAuthSuccess = async (user: UserRecord) => {
-    setCurrentUser(user);
-    setCurrentView('DASHBOARD');
-    await fetchHistory(user.id);
-  };
-
-  const handleNewPrediction = async (p: CarbonPrediction) => {
-    const userId = currentUser?.id || 'anonymous';
-    const updated = { ...p, userId: userId };
-    
-    setHistory(prev => [...prev, updated]);
-    setActivePrediction(updated);
+  const handleCompleteAudit = async (prediction: CarbonPrediction) => {
+    setActivePrediction(prediction);
+    await databaseService.saveHistory(prediction);
+    await fetchHistory(currentUser?.id);
     setCurrentView('AI_REPORT');
-    
-    try {
-      await databaseService.saveHistory(updated);
-      if (currentUser) {
-        await databaseService.logActivity(
-          currentUser.id, 
-          currentUser.name, 
-          "EMISSION_SYNCED", 
-          `Impact updated: ${p.total}kg CO2e detected.`
-        );
-      }
-    } catch (err) {
-      console.error("Database sync failed", err);
-    }
+  };
+
+  const handleScanComplete = async (prediction: CarbonPrediction) => {
+    await databaseService.saveHistory(prediction);
+    await fetchHistory(currentUser?.id);
+    setActivePrediction(prediction);
+    setCurrentView('AI_REPORT');
   };
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#020617] flex flex-col items-center justify-center p-10 text-center">
-        <div className="relative">
-          <div className="w-20 h-20 border-4 border-emerald-500/10 border-t-emerald-500 rounded-full animate-spin"></div>
-          <div className="absolute inset-0 flex items-center justify-center">
-             <i className="fas fa-brain text-emerald-500 text-xs animate-pulse"></i>
-          </div>
+      <div className="min-h-screen bg-[#020617] flex items-center justify-center">
+        <div className="text-center space-y-4">
+          <NeonBrainIcon className="w-20 h-20 animate-pulse mx-auto" />
+          <p className="text-emerald-500 font-black uppercase tracking-[0.5em] text-[10px] animate-pulse">Syncing Hub...</p>
         </div>
-        <p className="text-emerald-500 font-black tracking-[0.5em] uppercase text-[11px] mt-10 animate-pulse">Syncing Neural Terminal...</p>
-        <p className="text-slate-600 font-mono text-[8px] mt-4 uppercase tracking-widest">Protocol: AES-512-V2 | Project: {PROJECT_NUMBER}</p>
       </div>
     );
   }
@@ -184,172 +159,100 @@ const App: React.FC = () => {
     return <AuthLock onAuthSuccess={handleAuthSuccess} />;
   }
 
-  const isMaster = databaseService.isMaster(currentUser?.email);
-
-  const navItems = [
-    { view: 'DASHBOARD' as AppView, label: 'Neural Hub', icon: 'fa-brain-circuit', isBrain: true }, 
-    { view: 'SCOPE_INPUT' as AppView, label: 'Profiler', icon: 'fa-calculator' },
-    { view: 'VISION' as AppView, label: 'Audit Vision', icon: 'fa-eye' },
-    { view: 'SANDBOX' as AppView, label: 'Strategic Lab', icon: 'fa-leaf' },
-    { view: 'MAPS' as AppView, label: 'Geospatial', icon: 'fa-globe-americas' },
-    { view: 'PROFILE' as AppView, label: 'Identity Node', icon: 'fa-user' },
-    { view: 'AUTHORITY' as AppView, label: 'Command Center', icon: 'fa-shield-halved', restricted: true },
-  ];
-
-  const handleNavClick = (view: AppView) => {
-    setCurrentView(view);
-    setIsSidebarOpen(false);
-  };
+  const isOwner = currentUser?.role === 'OWNER';
 
   return (
-    <div className={`min-h-screen flex flex-col lg:flex-row bg-[#020617] font-sans selection:bg-emerald-500/30 ${isSystemOverridden ? 'border-4 border-amber-500/20' : ''}`}>
-      {isSidebarOpen && (
-        <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[190] lg:hidden"
-          onClick={() => setIsSidebarOpen(false)}
-        />
-      )}
-
-      <aside className={`
-        fixed inset-y-0 left-0 w-80 bg-[#020617] border-r border-white/5 flex flex-col h-screen z-[200] transition-transform duration-500 ease-in-out
-        lg:sticky lg:translate-x-0
-        ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
-        <div className="p-10 lg:p-12 flex items-center justify-between">
-          <div className="flex items-center gap-5">
-            <div className={`w-12 h-12 lg:w-14 lg:h-14 ${isSystemOverridden ? 'bg-amber-600' : 'bg-emerald-600'} rounded-[1.25rem] flex items-center justify-center text-white text-2xl lg:text-3xl shadow-[0_20px_40px_rgba(16,185,129,0.3)]`}>
-              <i className={`fas ${isSystemOverridden ? 'fa-bolt' : 'fa-leaf'}`}></i>
-            </div>
+    <div className="min-h-screen bg-[#020617] text-slate-200 font-sans selection:bg-emerald-500/30">
+      {/* Sidebar Navigation */}
+      <aside className={`fixed top-0 left-0 h-full w-80 bg-[#0f172a] border-r border-white/5 z-[200] transform transition-transform duration-500 ease-in-out ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}>
+        <div className="flex flex-col h-full p-10">
+          <div className="flex items-center gap-4 mb-16 px-2">
+            <NeonBrainIcon className="w-10 h-10" />
             <div>
-              <span className="text-2xl lg:text-3xl font-black text-white tracking-tighter uppercase leading-none">CarbonAI</span>
-              <p className={`text-[9px] lg:text-[10px] ${isSystemOverridden ? 'text-amber-500' : 'text-emerald-500'} font-black tracking-[0.4em] uppercase mt-1`}>Terminal</p>
+              <h1 className="text-xl font-black text-white tracking-tighter uppercase leading-none">CarbonSense</h1>
+              <p className="text-[8px] font-black text-emerald-500 uppercase tracking-[0.3em] mt-1">Neural Core V2.0</p>
             </div>
           </div>
-          <button 
-            onClick={() => setIsSidebarOpen(false)}
-            className="lg:hidden text-slate-500 hover:text-white transition-colors"
-          >
-            <i className="fas fa-times text-xl"></i>
-          </button>
-        </div>
-        
-        <nav className="flex-grow mt-6 lg:mt-10 px-6 space-y-2 lg:space-y-3 overflow-y-auto custom-scrollbar">
-          {navItems.map((item) => {
-            if (item.restricted && !isMaster) return null;
-            const isActive = currentView === item.view;
-            return (
-              <button 
-                key={item.view}
-                onClick={() => handleNavClick(item.view)}
-                className={`w-full flex items-center gap-5 p-4 lg:p-5 rounded-2xl transition-all group border ${
-                  isActive ? 'nav-active-box text-white' : 'border-transparent text-slate-500 hover:text-white hover:bg-white/5'
-                }`}
-              >
-                <div className="w-8 flex justify-center items-center">
-                  {item.isBrain ? (
-                    <NeonBrainIcon className="w-7 h-7" />
-                  ) : (
-                    <i className={`fas ${item.icon} text-lg lg:text-xl ${isActive ? (isSystemOverridden ? 'text-amber-400' : 'text-emerald-400') : 'text-slate-500 group-hover:text-white'}`}></i>
-                  )}
-                </div>
-                <span className={`font-black text-[11px] lg:text-[12px] tracking-widest uppercase ${isActive ? 'text-white' : 'text-slate-500'}`}>
-                  {item.label}
-                </span>
-              </button>
-            );
-          })}
-        </nav>
 
-        <div className="p-8 lg:p-10 border-t border-white/5">
-          <div className="mb-6 lg:mb-8 p-5 lg:p-6 glass-panel rounded-3xl border border-white/5">
-             <div className="flex items-center gap-3 mb-4">
-                <div className={`w-2.5 h-2.5 lg:w-3 lg:h-3 rounded-full ${isMaster ? 'bg-amber-500 shadow-[0_0_10px_#f59e0b]' : 'bg-emerald-500 shadow-[0_0_10px_#10b981]'}`}></div>
-                <p className="text-[9px] lg:text-[10px] font-black text-slate-500 uppercase tracking-widest">{isMaster ? 'Master Node' : 'Registry Status'}</p>
-             </div>
-             <p className="text-xs lg:text-sm font-black text-white truncate mb-1 lg:mb-2">{isMaster ? 'NODE_PRIME' : currentUser?.name}</p>
-             <p className="text-[9px] lg:text-[10px] font-mono text-slate-500 truncate mb-4">{isMaster ? 'AUTH_VERIFIED' : 'SESSION_ACTIVE'}</p>
-             <span className={`text-[8px] lg:text-[9px] font-black ${isSystemOverridden ? 'text-amber-500 border-amber-500/20 bg-amber-500/10' : 'text-emerald-500 border-emerald-500/20 bg-emerald-500/10'} uppercase tracking-[0.2em] px-3 py-1 rounded-full border`}>{isMaster ? 'OWNER' : currentUser?.role}</span>
+          <nav className="flex-grow space-y-2">
+            {[
+              { id: 'DASHBOARD', icon: 'fa-chart-pie', label: 'Impact Grid' },
+              { id: 'SCOPE_INPUT', icon: 'fa-fingerprint', label: 'Profiler' },
+              { id: 'VISION', icon: 'fa-eye', label: 'Audit Vision' },
+              { id: 'SANDBOX', icon: 'fa-brain-circuit', label: 'Sandbox' },
+              { id: 'MAPS', icon: 'fa-earth-asia', label: 'Geospatial' },
+              { id: 'AI_REPORT', icon: 'fa-microchip-ai', label: 'Neural Report', disabled: !activePrediction && history.length === 0 },
+              { id: 'PROFILE', icon: 'fa-user-gear', label: 'Registry' }
+            ].map((item) => (
+              <button
+                key={item.id}
+                onClick={() => { setCurrentView(item.id as AppView); setIsSidebarOpen(false); }}
+                disabled={item.disabled}
+                className={`w-full flex items-center gap-4 px-6 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${currentView === item.id ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-900/20' : 'text-slate-500 hover:bg-white/5 hover:text-white disabled:opacity-30'}`}
+              >
+                <i className={`fas ${item.icon} w-5`}></i>
+                {item.label}
+              </button>
+            ))}
+            
+            {isOwner && (
+              <button
+                onClick={() => { setCurrentView('AUTHORITY'); setIsSidebarOpen(false); }}
+                className={`w-full flex items-center gap-4 px-6 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all mt-8 ${currentView === 'AUTHORITY' ? 'bg-amber-600 text-white shadow-lg' : 'text-amber-500/60 hover:bg-amber-500/10 hover:text-amber-500'}`}
+              >
+                <i className="fas fa-crown w-5"></i>
+                Authority
+              </button>
+            )}
+          </nav>
+
+          <div className="pt-10 border-t border-white/5 space-y-6">
+            <div className="px-6 py-4 bg-white/5 rounded-2xl border border-white/5">
+              <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Active Identity</p>
+              <p className="text-[10px] font-black text-white uppercase truncate">{currentUser?.name}</p>
+            </div>
+            <button onClick={handleLogout} className="w-full flex items-center gap-4 px-6 py-4 text-slate-500 hover:text-rose-500 text-[10px] font-black uppercase tracking-widest transition-all">
+              <i className="fas fa-power-off w-5"></i>
+              Terminate
+            </button>
           </div>
-          <button onClick={handleLogout} className="w-full flex items-center justify-center gap-4 py-4 lg:py-5 bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white rounded-[1.5rem] transition-all font-black uppercase tracking-[0.3em] text-[10px] lg:text-[11px] shadow-2xl active:scale-95">
-            <i className="fas fa-power-off"></i>
-            Purge Session
-          </button>
         </div>
       </aside>
 
-      <main className="flex-grow flex flex-col min-h-screen">
-        <header className="h-24 lg:h-32 bg-[#020617] border-b border-white/5 flex items-center justify-between px-6 lg:px-16 sticky top-0 z-[150] backdrop-blur-3xl">
-          <div className="flex items-center gap-6 lg:gap-10">
-             <button 
-               onClick={() => setIsSidebarOpen(true)}
-               className="lg:hidden w-12 h-12 bg-white/5 border border-white/10 rounded-xl flex items-center justify-center text-white"
-             >
-               <i className="fas fa-bars"></i>
-             </button>
-
-             <div className="hidden sm:flex w-12 h-12 lg:w-16 lg:h-16 header-icon-box rounded-[1.25rem] lg:rounded-[1.5rem] shadow-2xl items-center justify-center">
-               <NeonBrainIcon className="w-8 h-8 lg:w-10 lg:h-10" />
-             </div>
-             <div>
-                <div className="flex items-center gap-3 mb-1">
-                   <div className={`w-1.5 h-1.5 lg:w-2 lg:h-2 ${isSystemOverridden ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : 'bg-emerald-500 shadow-[0_0_8px_#10b981]'} rounded-full animate-pulse`}></div>
-                   <h2 className={`text-[9px] lg:text-[11px] font-black ${isSystemOverridden ? 'text-amber-500' : 'text-emerald-500'} uppercase tracking-[0.4em]`}>Terminal Sync: {isSystemOverridden ? 'OVERRIDDEN' : 'Nominal'}</h2>
-                </div>
-                <p className="text-white font-black text-2xl lg:text-4xl tracking-tighter uppercase leading-none">
-                   {currentView.replace('_', ' ')}
-                </p>
-             </div>
-          </div>
-
-          <div className="hidden md:flex items-center gap-16">
-            <div className="text-right">
-              <p className="text-[11px] font-black text-slate-500 uppercase tracking-[0.4em] mb-2">Neural Link Synchronization</p>
-              <div className="flex items-center gap-6 text-white font-black">
-                 <span className="text-lg tracking-tighter">{currentTime.toLocaleDateString()}</span>
-                 <div className="w-px h-6 bg-white/10"></div>
-                 <span className={`${isSystemOverridden ? 'text-amber-500' : 'text-emerald-500'} text-lg tracking-tighter text-neural`}>{currentTime.toLocaleTimeString()}</span>
+      {/* Main Content Area */}
+      <main className="lg:pl-80 min-h-screen">
+        <header className="sticky top-0 z-[100] bg-[#020617]/80 backdrop-blur-xl border-b border-white/5 px-6 lg:px-12 py-6">
+          <div className="flex justify-between items-center max-w-7xl mx-auto">
+            <div className="flex items-center gap-6">
+              <button onClick={() => setIsSidebarOpen(true)} className="lg:hidden text-slate-400 p-2"><i className="fas fa-bars-staggered text-xl"></i></button>
+              <div className="hidden sm:block">
+                <p className="text-[9px] font-black text-emerald-500 uppercase tracking-[0.4em] mb-1">Terminal Status: Online</p>
+                <h2 className="text-white text-xs font-black uppercase tracking-widest">{currentView.replace('_', ' ')}</h2>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="text-right hidden md:block">
+                <p className="text-white text-[10px] font-black tabular-nums">{currentTime.toLocaleTimeString()}</p>
+                <p className="text-slate-500 text-[8px] font-black uppercase tracking-widest">{currentTime.toLocaleDateString()}</p>
+              </div>
+              <div className="h-10 w-[1px] bg-white/5 hidden md:block"></div>
+              <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-emerald-500">
+                <i className="fas fa-signal-stream animate-pulse"></i>
               </div>
             </div>
           </div>
         </header>
 
-        <section className="flex-grow p-6 lg:p-16 overflow-y-auto custom-scrollbar">
-          <div className="max-w-7xl mx-auto h-full">
-            {currentView === 'DASHBOARD' && <Dashboard history={history} config={globalConfig} isMaster={isMaster} />}
-            {currentView === 'SCOPE_INPUT' && <ScopeForms onComplete={handleNewPrediction} userId={currentUser?.id || 'anonymous'} factors={globalConfig} />}
-            {currentView === 'AI_REPORT' && activePrediction && <AIReport prediction={activePrediction} history={history} />}
-            {currentView === 'SANDBOX' && <WhatIfSandbox history={history} />}
-            {currentView === 'MAPS' && <MapsView />}
-            {currentView === 'VISION' && (
-              <VisionScanner 
-                onScanComplete={handleNewPrediction} 
-                userId={currentUser?.id || 'anonymous'} 
-                isOverridden={isSystemOverridden}
-                setIsOverridden={setIsSystemOverridden}
-                userEmail={currentUser?.email || ''}
-              />
-            )}
-            {currentView === 'AUTHORITY' && isMaster && (
-              <AuthorityConsole 
-                config={globalConfig} 
-                setConfig={setGlobalConfig} 
-                history={history} 
-                isOwner={isMaster} 
-                isOverridden={isSystemOverridden}
-                setIsOverridden={setIsSystemOverridden}
-              />
-            )}
-            {currentView === 'PROFILE' && currentUser && (
-              <ProfileView 
-                user={currentUser} 
-                history={history} 
-                onUpdate={setCurrentUser}
-                config={globalConfig}
-                setConfig={setGlobalConfig}
-              />
-            )}
-          </div>
-        </section>
+        <div className="p-6 lg:p-12 max-w-7xl mx-auto h-[calc(100vh-80px)] overflow-y-auto scrollbar-hide">
+          {currentView === 'DASHBOARD' && <Dashboard history={history} config={globalConfig} />}
+          {currentView === 'SCOPE_INPUT' && <ScopeForms userId={currentUser?.id || ''} factors={globalConfig} onComplete={handleCompleteAudit} />}
+          {currentView === 'AI_REPORT' && (activePrediction || history.length > 0) && <AIReport prediction={activePrediction || history[history.length-1]} history={history} />}
+          {currentView === 'SANDBOX' && <WhatIfSandbox history={history} />}
+          {currentView === 'MAPS' && <MapsView />}
+          {currentView === 'VISION' && <VisionScanner userId={currentUser?.id || ''} onScanComplete={handleScanComplete} userEmail={currentUser?.email || ''} isOverridden={isSystemOverridden} setIsOverridden={setIsSystemOverridden} />}
+          {currentView === 'AUTHORITY' && isOwner && <AuthorityConsole config={globalConfig} setConfig={setGlobalConfig} history={history} isOwner={isOwner} isOverridden={isSystemOverridden} setIsOverridden={setIsSystemOverridden} />}
+          {currentView === 'PROFILE' && <ProfileView user={currentUser!} history={history} onUpdate={setCurrentUser} config={globalConfig} setConfig={setGlobalConfig} />}
+        </div>
       </main>
     </div>
   );
