@@ -1,0 +1,9 @@
+{
+  "name": "Copy of CarbonAI – Neural Sustainability Platform",
+  "description": "An enterprise-grade AI platform for predictive carbon analytics, supply chain auditing, and neural sustainability forecasting.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
