@@ -2,8 +2,9 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { UserRecord, CarbonPrediction, UserRole } from "../types";
 
-const SUPABASE_URL = 'https://jclodjhswwjfuwqaxpcj.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_fg_uCTKwmg2jWlQaqtjRVw_7YikzoTJ';
+// Switched to process.env which is injected via vite.config.ts define block to avoid runtime undefined errors
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://jclodjhswwjfuwqaxpcj.supabase.co';
+const SUPABASE_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_fg_uCTKwmg2jWlQaqtjRVw_7YikzoTJ';
 
 export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_KEY);
 
